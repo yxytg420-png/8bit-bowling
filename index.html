@@ -238,11 +238,30 @@
     game.busy=false;posBall();update()
   }
   function calc(){
-    const a=Math.abs(Number(aim.value))/100,p=Number(power.value)/100,c=1-a;
-    let e=10*(.12+.58*p+.40*c);e-=Math.max(0,.58-p)*4;
-    let n=Math.round(e+(Math.random()*3.2-1.6));
-    if(c>.9&&p>.77&&Math.random()<.28)n=10;
-    return Math.max(0,Math.min(game.remaining,n))
+    const a=Math.abs(Number(aim.value))/100;
+    const p=Number(power.value)/100;
+    const c=1-a;
+
+    // 普通の投球は6〜9本くらいが中心。
+    // 狙いが中央に近く、パワーが80%前後だと有利。
+    const sweetPower = 1 - Math.min(1, Math.abs(p - 0.80) / 0.45);
+    let e = 3.2 + (c * 3.0) + (sweetPower * 2.1);
+
+    // 弱すぎ・強すぎ・狙いが外れすぎると減点。
+    if(p < 0.48) e -= 1.2;
+    if(p > 0.95) e -= 0.8;
+    e -= a * 1.8;
+
+    let n = Math.round(e + (Math.random() * 3.0 - 1.5));
+
+    // ストライクは良い投球の時だけ低確率（約11%）。
+    if(c > 0.90 && sweetPower > 0.82 && Math.random() < 0.11){
+      n = 10;
+    } else {
+      n = Math.min(n, 9);
+    }
+
+    return Math.max(0, Math.min(game.remaining, n))
   }
   function roll(){
     if(game.busy||game.over)return;game.busy=true;update();jingle('roll');
