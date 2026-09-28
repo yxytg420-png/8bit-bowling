@@ -155,7 +155,19 @@
   }
   function renderPins(){
     pins.innerHTML='';
-    layout.forEach((d,i)=>{const el=document.createElement('div');el.className='pin';el.style.left=d.x+'px';el.style.top=d.y+'px';el.style.transform=`scale(${d.s})`;el.dataset.s=d.s;const inner=document.createElement('i');el.appendChild(inner);pins.appendChild(el)})
+    layout.forEach((d,i)=>{
+      const el=document.createElement('div');
+      el.className='pin';
+      el.style.left=d.x+'px';
+      el.style.top=d.y+'px';
+      el.style.transform=`scale(${d.s})`;
+      el.dataset.s=d.s;
+      el.dataset.x=d.x;
+      el.dataset.pin=i;
+      const inner=document.createElement('i');
+      el.appendChild(inner);
+      pins.appendChild(el)
+    })
   }
   function standing(){return [...pins.children].filter(x=>!x.dataset.down)}
   function knock(n){
@@ -238,23 +250,59 @@
     game.busy=false;posBall();update()
   }
   function calc(){
-    const a=Math.abs(Number(aim.value))/100;
-    const p=Number(power.value)/100;
-    const c=1-a;
-
-    // 普通の投球は6〜9本くらいが中心。
-    // 狙いが中央に近く、パワーが80%前後だと有利。
+    const aimNorm = Number(aim.value) / 100;
+    const a = Math.abs(aimNorm);
+    const p = Number(power.value) / 100;
+    const c = 1 - a;
     const sweetPower = 1 - Math.min(1, Math.abs(p - 0.80) / 0.45);
+
+    // 2投目以降：残っているピンの位置と狙いを比較する。
+    if(game.remaining < 10){
+      const leftPins = standing();
+      if(!leftPins.length) return 0;
+
+      // ピン配置の中央(x=73前後)を0、左右端を-1〜+1として扱う。
+      const avgX = leftPins.reduce((sum, el) => sum + Number(el.dataset.x || 73), 0) / leftPins.length;
+      const target = Math.max(-1, Math.min(1, (avgX - 73) / 63));
+      const diff = Math.abs(aimNorm - target);
+
+      // 狙いと残りピンの位置が近いほどヒットしやすい。
+      const aimQuality = Math.max(0, 1 - diff / 0.72);
+      const quality = Math.max(0, Math.min(1, aimQuality * (0.45 + sweetPower * 0.55)));
+
+      // 残り1本でも自動スペアにはしない。
+      if(game.remaining === 1){
+        const hitChance = 0.12 + quality * 0.70; // 最大でも約82%
+        return Math.random() < hitChance ? 1 : 0;
+      }
+
+      let n = Math.round(
+        game.remaining * (0.18 + quality * 0.62) +
+        (Math.random() * 2.4 - 1.2)
+      );
+      n = Math.max(0, Math.min(game.remaining, n));
+
+      // 全部倒れる場合は、さらにスペア判定を入れる。
+      if(n >= game.remaining){
+        const spareChance = 0.05 + quality * 0.48;
+        if(Math.random() >= spareChance){
+          n = Math.max(0, game.remaining - 1);
+        }
+      }
+
+      return n;
+    }
+
+    // 1投目：通常は6〜9本くらいが中心。
     let e = 3.2 + (c * 3.0) + (sweetPower * 2.1);
 
-    // 弱すぎ・強すぎ・狙いが外れすぎると減点。
     if(p < 0.48) e -= 1.2;
     if(p > 0.95) e -= 0.8;
     e -= a * 1.8;
 
     let n = Math.round(e + (Math.random() * 3.0 - 1.5));
 
-    // ストライクは良い投球の時だけ低確率（約11%）。
+    // ストライクは良い投球の時だけ低確率。
     if(c > 0.90 && sweetPower > 0.82 && Math.random() < 0.11){
       n = 10;
     } else {
