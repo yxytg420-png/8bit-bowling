@@ -163,6 +163,7 @@
       el.style.transform=`scale(${d.s})`;
       el.dataset.s=d.s;
       el.dataset.x=d.x;
+      el.dataset.y=d.y;
       el.dataset.pin=i;
       const inner=document.createElement('i');
       el.appendChild(inner);
@@ -170,11 +171,20 @@
     })
   }
   function standing(){return [...pins.children].filter(x=>!x.dataset.down)}
-  function knock(n){
-    const a=standing();
-    for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}
-    a.slice(0,n).forEach((el,i)=>{el.dataset.down='1';const s=Number(el.dataset.s);el.style.transform=`scale(${s}) rotate(${i%2?78:-78}deg) translateY(8px)`;el.style.opacity='.18'});
-    if(n)jingle('pin')
+  function knockPinsByIds(ids){
+    const hitSet=new Set(ids.map(String));
+    let count=0;
+    [...pins.children].forEach((el)=>{
+      if(el.dataset.down || !hitSet.has(el.dataset.pin))return;
+      el.dataset.down='1';
+      const s=Number(el.dataset.s);
+      const i=Number(el.dataset.pin);
+      el.style.transform=`scale(${s}) rotate(${i%2?78:-78}deg) translateY(8px)`;
+      el.style.opacity='.18';
+      count++;
+    });
+    if(count)jingle('pin');
+    return count
   }
   function frameText(f,i){
     if(!f.length)return '·';
@@ -249,74 +259,244 @@
     }
     game.busy=false;posBall();update()
   }
-  function calc(){
-    const aimNorm = Number(aim.value) / 100;
-    const a = Math.abs(aimNorm);
-    const p = Number(power.value) / 100;
-    const c = 1 - a;
-    const sweetPower = 1 - Math.min(1, Math.abs(p - 0.80) / 0.45);
+  const pinLinks={
+    9:[7,8],       // 1番ピン → 2番・3番
+    7:[4,5],       // 2番 → 4番・5番
+    8:[5,6],       // 3番 → 5番・6番
+    4:[0,1],       // 4番 → 7番・8番
+    5:[1,2],       // 5番 → 8番・9番
+    6:[2,3],       // 6番 → 9番・10番
+    0:[],1:[],2:[],3:[]
+  };
 
-    // 2投目以降：残っているピンの位置と狙いを比較する。
-    if(game.remaining < 10){
-      const leftPins = standing();
-      if(!leftPins.length) return 0;
+  function clamp(v,min,max){return Math.max(min,Math.min(max,v))}
 
-      // ピン配置の中央(x=73前後)を0、左右端を-1〜+1として扱う。
-      const avgX = leftPins.reduce((sum, el) => sum + Number(el.dataset.x || 73), 0) / leftPins.length;
-      const target = Math.max(-1, Math.min(1, (avgX - 73) / 63));
-      const diff = Math.abs(aimNorm - target);
+  function pinInfo(){
+    return standing().map(el=>({
+      el,
+      id:Number(el.dataset.pin),
+      x:(Number(el.dataset.x)-73)/63,
+      y:Number(el.dataset.y)
+    }));
+  }
 
-      // 狙いと残りピンの位置が近いほどヒットしやすい。
-      const aimQuality = Math.max(0, 1 - diff / 0.72);
-      const quality = Math.max(0, Math.min(1, aimQuality * (0.45 + sweetPower * 0.55)));
+  function addCascade(fallen, info, startId, baseChance, sideBias=0){
+    const queue=[startId];
 
-      // 残り1本でも自動スペアにはしない。
-      if(game.remaining === 1){
-        const hitChance = 0.12 + quality * 0.70; // 最大でも約82%
-        return Math.random() < hitChance ? 1 : 0;
+    while(queue.length){
+      const from=queue.shift();
+      const next=pinLinks[from]||[];
+
+      next.forEach((to,branchIndex)=>{
+        const target=info.find(v=>v.id===to);
+        if(!target || fallen.has(to))return;
+
+        const src=info.find(v=>v.id===from);
+        let chance=baseChance;
+
+        // 同じ側へ流れるピンアクションは少し起きやすい。
+        if(src){
+          const flow=Math.sign(target.x-src.x);
+          if(sideBias!==0 && flow===sideBias) chance+=.09;
+          if(sideBias!==0 && flow===-sideBias) chance-=.05;
+        }
+
+        // 奥へ行くほど少し勢いが落ちる。
+        chance-=branchIndex*.025;
+        chance-=Math.max(0, target.y < 28 ? .03 : 0);
+
+        if(Math.random()<clamp(chance,.18,.88)){
+          fallen.add(to);
+          queue.push(to);
+        }
+      });
+    }
+  }
+
+  function simulateFullRack(){
+    const info=pinInfo();
+    const aimNorm=Number(aim.value)/100;
+    const p=Number(power.value)/100;
+    const sweetPower=1-Math.min(1,Math.abs(p-.80)/.34);
+
+    // ±0.17あたりを「ポケット」とする。
+    // 右投げ・左投げの概念は持たせず、左右どちらでも攻略可能。
+    const rightPocketDist=Math.abs(aimNorm-.17);
+    const leftPocketDist=Math.abs(aimNorm+.17);
+    const pocketDist=Math.min(rightPocketDist,leftPocketDist);
+    const pocketSide=rightPocketDist<leftPocketDist ? 1 : -1;
+    const inPocket=pocketDist<.075;
+    const nearPocket=pocketDist<.14;
+
+    // ド真ん中はヘッドピン正面。倒れる本数は多いが、
+    // 左右へ均等に割れて10本目が残りやすい。
+    const centerDist=Math.abs(aimNorm);
+    const deadCenter=centerDist<.055;
+
+    // 外しすぎるとヘッドピンにすら当たりにくい。
+    if(Math.abs(aimNorm)>.62){
+      return Math.random()<.22 ? [pocketSide>0?3:0] : [];
+    }
+
+    // ヘッドピンへの最初の接触。
+    // ポケットでは1番ピンを少し斜めに薄く捉えるイメージ。
+    const fallen=new Set([9]);
+
+    let base=.43 + sweetPower*.18;
+
+    if(inPocket){
+      // ポケットは連鎖が最も強い。
+      base+=.19;
+
+      // 1番ピンから、狙った側の2番/3番へ高確率でつなぐ。
+      const firstSide=pocketSide>0 ? 8 : 7;
+      const otherSide=pocketSide>0 ? 7 : 8;
+
+      fallen.add(firstSide);
+
+      if(Math.random()<(.56 + sweetPower*.20)){
+        fallen.add(otherSide);
       }
 
-      let n = Math.round(
-        game.remaining * (0.18 + quality * 0.62) +
-        (Math.random() * 2.4 - 1.2)
-      );
-      n = Math.max(0, Math.min(game.remaining, n));
+      addCascade(fallen,info,firstSide,base,pocketSide);
+      if(fallen.has(otherSide)){
+        addCascade(fallen,info,otherSide,base-.07,pocketSide);
+      }
 
-      // 全部倒れる場合は、さらにスペア判定を入れる。
-      if(n >= game.remaining){
-        const spareChance = 0.05 + quality * 0.48;
-        if(Math.random() >= spareChance){
-          n = Math.max(0, game.remaining - 1);
+      // きれいなポケット＋適正パワーでは、奥のピンまで強く飛びやすい。
+      if(sweetPower>.76){
+        info.forEach(t=>{
+          if(fallen.has(t.id))return;
+          const sameSide=Math.sign(t.x)===pocketSide || Math.abs(t.x)<.08;
+          if(sameSide && Math.random()<.12){
+            fallen.add(t.id);
+          }
+        });
+      }
+
+      // 完璧に近いポケットはストライクチャンスを追加。
+      // ただし確定にはしない。
+      const perfect=pocketDist<.035 && sweetPower>.82;
+      if(perfect && fallen.size>=8 && Math.random()<.36){
+        info.forEach(t=>fallen.add(t.id));
+      }
+
+    }else if(deadCenter){
+      // 真ん中直撃は左右へ散るが、ピンアクションは少し弱い。
+      // 「真ん中固定でストライク連発」を防ぐため、10本全部は倒しにくくする。
+      if(Math.random()<.80) fallen.add(7);
+      if(Math.random()<.80) fallen.add(8);
+
+      if(fallen.has(7)) addCascade(fallen,info,7,base-.08,-1);
+      if(fallen.has(8)) addCascade(fallen,info,8,base-.08,1);
+
+      // 真ん中直撃では最低1本は残りやすくする。
+      if(fallen.size===10 || (fallen.size>=9 && Math.random()<.72)){
+        const backCandidates=[0,3,1,2].filter(id=>fallen.has(id));
+        if(backCandidates.length){
+          const keep=backCandidates[Math.floor(Math.random()*backCandidates.length)];
+          fallen.delete(keep);
         }
       }
 
-      return n;
+    }else{
+      // ポケット外。狙い側へは倒れるが、連鎖は弱め。
+      const firstSide=aimNorm>=0 ? 8 : 7;
+      fallen.add(firstSide);
+      addCascade(fallen,info,firstSide,base-.11,Math.sign(aimNorm)||1);
+
+      // 反対側へ回り込む確率は低い。
+      const otherSide=firstSide===8 ? 7 : 8;
+      if(nearPocket && Math.random()<.28){
+        fallen.add(otherSide);
+        addCascade(fallen,info,otherSide,base-.18,Math.sign(aimNorm)||1);
+      }
     }
 
-    // 1投目：通常は6〜9本くらいが中心。
-    let e = 3.2 + (c * 3.0) + (sweetPower * 2.1);
-
-    if(p < 0.48) e -= 1.2;
-    if(p > 0.95) e -= 0.8;
-    e -= a * 1.8;
-
-    let n = Math.round(e + (Math.random() * 3.0 - 1.5));
-
-    // ストライクは良い投球の時だけ低確率。
-    if(c > 0.90 && sweetPower > 0.82 && Math.random() < 0.11){
-      n = 10;
-    } else {
-      n = Math.min(n, 9);
+    // パワーが弱すぎる/強すぎるとピンアクションが落ちる。
+    if(p<.52 || p>.96){
+      const ids=[...fallen].filter(id=>id!==9);
+      if(ids.length && Math.random()<.55){
+        fallen.delete(ids[Math.floor(Math.random()*ids.length)]);
+      }
     }
 
-    return Math.max(0, Math.min(game.remaining, n))
+    return [...fallen];
   }
+
+  function simulateSpare(){
+    const info=pinInfo();
+    if(!info.length)return [];
+
+    const aimNorm=Number(aim.value)/100;
+    const p=Number(power.value)/100;
+    const sweetPower=1-Math.min(1,Math.abs(p-.80)/.38);
+
+    // 残りピンの平均位置に向けて投げる必要がある。
+    const targetX=info.reduce((s,v)=>s+v.x,0)/info.length;
+    const diff=Math.abs(aimNorm-targetX);
+
+    // 以前よりかなり狭い当たり幅。
+    const hitWidth=.12 + sweetPower*.018;
+    if(diff>hitWidth)return [];
+
+    const quality=clamp(1-diff/hitWidth,0,1);
+
+    // 残り1本は、狙いが合っていてもミスがある。
+    if(info.length===1){
+      const hitChance=.42 + quality*.42 + sweetPower*.08; // 最大約92%
+      return Math.random()<hitChance ? [info[0].id] : [];
+    }
+
+    // 複数残りはまず最も狙いに近いピンへ接触。
+    const first=[...info].sort((a,b)=>Math.abs(a.x-aimNorm)-Math.abs(b.x-aimNorm))[0];
+    const fallen=new Set();
+
+    const directChance=.56 + quality*.28 + sweetPower*.10;
+    if(Math.random()>directChance)return [];
+
+    fallen.add(first.id);
+
+    // 近接ピンだけ連鎖。離れたスプリットはかなり厳しい。
+    info.forEach(t=>{
+      if(fallen.has(t.id))return;
+      const dx=Math.abs(t.x-first.x);
+      const dy=Math.abs(t.y-first.y);
+
+      let chance=.08;
+      if(dx<.34 && dy<=30) chance=.42 + sweetPower*.18;
+      else if(dx<.52 && dy<=55) chance=.18 + sweetPower*.10;
+
+      if(Math.random()<chance){
+        fallen.add(t.id);
+      }
+    });
+
+    return [...fallen];
+  }
+
+  function simulateThrow(){
+    return game.remaining===10 ? simulateFullRack() : simulateSpare()
+  }
+
   function roll(){
-    if(game.busy||game.over)return;game.busy=true;update();jingle('roll');
-    const ex=Number(aim.value)*.17;
+    if(game.busy||game.over)return;
+    game.busy=true;
+    update();
+    jingle('roll');
+
+    // 画面上のボール位置も判定の狙いに合わせる。
+    const ex=Number(aim.value)*.42;
     ball.style.transition='bottom .78s steps(14),transform .78s steps(14)';
-    ball.style.bottom='278px';ball.style.transform=`translateX(calc(-50% + ${ex}px)) scale(.30)`;
-    setTimeout(()=>{const before=game.remaining,n=calc();knock(n);setTimeout(()=>after(n,before),360)},790)
+    ball.style.bottom='278px';
+    ball.style.transform=`translateX(calc(-50% + ${ex}px)) scale(.30)`;
+
+    setTimeout(()=>{
+      const before=game.remaining;
+      const ids=simulateThrow();
+      const n=knockPinsByIds(ids);
+      setTimeout(()=>after(n,before),360)
+    },790)
   }
 
   startBtn.addEventListener('click',()=>{ac();overlay.classList.add('hidden');beep(523,.08);beep(659,.08,'square',.05,.09);reset();msg.textContent='P1  1F  1とうめ'});
